@@ -1,0 +1,117 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# === настройки по умолчанию ===
+API_URL_DEFAULT="https://madhost.pw"          # сюда агент будет слать метрики (base URL)
+BINARY_BASE_URL="https://madhost.pw/static"   # откуда качаем бинарник агента
+
+CONFIG_PATH="/etc/madagent.json"
+BIN_PATH="/usr/local/bin/madagent"
+UNIT_PATH="/etc/systemd/system/madagent.service"
+
+NODE_ID=""
+NODE_TOKEN=""
+API_URL="$API_URL_DEFAULT"
+
+# --- разбор аргументов ---
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --node-id)
+      NODE_ID="$2"
+      shift 2
+      ;;
+    --token)
+      NODE_TOKEN="$2"
+      shift 2
+      ;;
+    --api-url)
+      API_URL="$2"
+      shift 2
+      ;;
+    *)
+      echo "Неизвестный аргумент: $1"
+      exit 1
+      ;;
+  esac
+done
+
+if [[ -z "$NODE_ID" || -z "$NODE_TOKEN" ]]; then
+  echo "Использование: install.sh --node-id <id> --token <token> [--api-url <url>]"
+  exit 1
+fi
+
+if [[ "$EUID" -ne 0 ]]; then
+  echo "Этот скрипт нужно запускать от root (или через sudo)."
+  exit 1
+fi
+
+echo "[*] Установка агента MadHost для узла: $NODE_ID"
+echo "[*] API URL (для метрик): $API_URL"
+
+# --- определяем архитектуру ---
+ARCH="$(uname -m)"
+case "$ARCH" in
+  x86_64|amd64)
+    AGENT_ARCH="linux-amd64"
+    ;;
+  aarch64|arm64)
+    AGENT_ARCH="linux-arm64"
+    ;;
+  *)
+    echo "Неподдерживаемая архитектура: $ARCH"
+    exit 1
+    ;;
+esac
+
+AGENT_URL="${BINARY_BASE_URL}/madagent-${AGENT_ARCH}"
+
+echo "[*] Скачиваю бинарник агента: $AGENT_URL"
+curl -fsSL "$AGENT_URL" -o "$BIN_PATH"
+chmod +x "$BIN_PATH"
+
+# --- конфиг ---
+echo "[*] Пишу конфиг в $CONFIG_PATH"
+mkdir -p "$(dirname "$CONFIG_PATH")"
+
+cat > "$CONFIG_PATH" <<EOF
+{
+  "api_url": "$API_URL",
+  "node_id": "$NODE_ID",
+  "token": "$NODE_TOKEN"
+}
+EOF
+
+chmod 600 "$CONFIG_PATH"
+
+# --- systemd unit ---
+echo "[*] Настраиваю systemd юнит в $UNIT_PATH"
+
+cat > "$UNIT_PATH" <<'EOF'
+[Unit]
+Description=MadHost node metrics agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/madagent
+Restart=always
+RestartSec=5
+Environment=MADAGENT_CONFIG=/etc/madagent.json
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# --- запуск сервиса ---
+echo "[*] Перезапуск systemd daemon и запуск сервиса"
+systemctl daemon-reload
+systemctl enable --now madagent
+
+sleep 2
+systemctl --no-pager --full status madagent || true
+
+echo
+echo "[✓] Агент установлен и запущен."
+echo "    Конфиг:   $CONFIG_PATH"
+echo "    Бинарник: $BIN_PATH"
