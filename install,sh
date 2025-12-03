@@ -8,6 +8,7 @@ GITHUB_REPO="madagent"
 CONFIG_PATH="/etc/madagent.json"
 BIN_PATH="/usr/local/bin/madagent"
 UNIT_PATH="/etc/systemd/system/madagent.service"
+GLIBC_TARGET="/opt/glibc-2.34"
 
 NODE_ID=""
 NODE_TOKEN=""
@@ -78,20 +79,20 @@ version_ge() {
   [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
 }
 
-AGENT_FLAVOUR="$AGENT_ARCH"
+NEED_EXTRA_GLIBC=false
 
 if [[ -n "${GLIBC_VER}" ]]; then
   if version_ge "${GLIBC_VER}" "2.32"; then
-    echo "[*] Обнаружен glibc ${GLIBC_VER} (>= 2.32), используем стандартный бинарник."
+    echo "[*] Обнаружен glibc ${GLIBC_VER} (>= 2.32), дополнительная glibc не требуется."
   else
-    echo "[*] Обнаружен glibc ${GLIBC_VER} (< 2.32), используем бинарник для старых систем."
-    AGENT_FLAVOUR="${AGENT_ARCH}-legacy"
+    echo "[*] Обнаружен glibc ${GLIBC_VER} (< 2.32), будет установлена glibc 2.34 в ${GLIBC_TARGET}."
+    NEED_EXTRA_GLIBC=true
   fi
 else
-  echo "[*] Не удалось определить версию glibc, используем стандартный бинарник."
+  echo "[*] Не удалось определить версию glibc, считаем что дополнительная glibc не нужна."
 fi
 
-AGENT_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/latest/download/madagent-${AGENT_FLAVOUR}"
+AGENT_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/latest/download/madagent-${AGENT_ARCH}"
 
 echo "[*] Скачиваю бинарник агента: $AGENT_URL"
 if command -v curl >/dev/null 2>&1; then
@@ -109,6 +110,72 @@ if ! file "$BIN_PATH" | grep -q 'ELF 64-bit'; then
   echo "Ошибка: скачан не ELF-бинарник. Возможно, GitHub вернул HTML/ошибку."
   echo "Проверь вручную: $AGENT_URL"
   exit 1
+fi
+
+# --- установка дополнительной glibc при необходимости ---
+install_extra_glibc() {
+  if [[ -d "$GLIBC_TARGET" ]]; then
+    echo "[*] glibc 2.34 уже установлена в ${GLIBC_TARGET}, пропускаю сборку."
+    return 0
+  fi
+
+  echo "[*] Устанавливаю зависимости для сборки glibc 2.34 (development tools)..."
+
+  if command -v dnf >/dev/null 2>&1; then
+    dnf -y groupinstall "Development Tools" || true
+    dnf -y install wget bison patch || true
+  elif command -v yum >/dev/null 2>&1; then
+    yum -y groupinstall "Development Tools" || true
+    yum -y install wget bison patch || true
+  elif command -v apt-get >/dev/null 2>&1; then
+    apt-get update || true
+    apt-get install -y build-essential wget bison gawk || true
+  elif command -v zypper >/dev/null 2>&1; then
+    zypper install -y -t pattern devel_basis || true
+    zypper install -y wget bison || true
+  else
+    echo "[!] Не удалось автоматически установить зависимости для сборки glibc (неизвестный пакетный менеджер)."
+    echo "    Попробую продолжить, но сборка может упасть."
+  fi
+
+  echo "[*] Скачиваю и собираю glibc 2.34 в ${GLIBC_TARGET} (это может занять время)..."
+
+  TMPDIR_GLIBC="$(mktemp -d /tmp/glibc-XXXXXX)"
+  cd "$TMPDIR_GLIBC"
+
+  wget -q https://ftp.gnu.org/gnu/libc/glibc-2.34.tar.gz
+  tar xf glibc-2.34.tar.gz
+  mkdir glibc-build
+  cd glibc-build
+
+  ../glibc-2.34/configure --prefix="${GLIBC_TARGET}" --disable-werror
+  make -j"$(nproc)"
+  make install
+
+  cd /
+  rm -rf "$TMPDIR_GLIBC"
+
+  echo "[*] glibc 2.34 установлена в ${GLIBC_TARGET}"
+}
+
+if [[ "$NEED_EXTRA_GLIBC" == true ]]; then
+  install_extra_glibc
+
+  echo "[*] Настраиваю wrapper для запуска madagent с glibc 2.34"
+
+  if [[ -f "${BIN_PATH}.real" ]]; then
+    rm -f "${BIN_PATH}.real"
+  fi
+
+  mv "$BIN_PATH" "${BIN_PATH}.real"
+
+  cat > "$BIN_PATH" <<EOF
+#!/usr/bin/env bash
+export LD_LIBRARY_PATH="${GLIBC_TARGET}/lib:\${LD_LIBRARY_PATH:-}"
+exec "${BIN_PATH}.real" "\$@"
+EOF
+
+  chmod +x "$BIN_PATH"
 fi
 
 echo "[*] Пишу конфиг в $CONFIG_PATH"
