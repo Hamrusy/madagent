@@ -171,8 +171,15 @@ if [[ "$NEED_EXTRA_GLIBC" == true ]]; then
 
   cat > "$BIN_PATH" <<EOF
 #!/usr/bin/env bash
-export LD_LIBRARY_PATH="${GLIBC_TARGET}/lib:\${LD_LIBRARY_PATH:-}"
-exec "${BIN_PATH}.real" "\$@"
+export LD_LIBRARY_PATH="/opt/glibc-2.34/lib:${LD_LIBRARY_PATH:-}"
+
+trap "kill -TERM $PID 2>/dev/null" TERM INT
+
+/usr/local/bin/madagent.real "$@" &
+PID=$!
+
+wait $PID
+exit $?
 EOF
 
   chmod +x "$BIN_PATH"
