@@ -171,15 +171,15 @@ if [[ "$NEED_EXTRA_GLIBC" == true ]]; then
 
   cat > "$BIN_PATH" <<EOF
 #!/usr/bin/env bash
-export LD_LIBRARY_PATH="/opt/glibc-2.34/lib:${LD_LIBRARY_PATH:-}"
+export LD_LIBRARY_PATH="${GLIBC_TARGET}/lib:\${LD_LIBRARY_PATH:-}"
 
-trap "kill -TERM $PID 2>/dev/null" TERM INT
+"${BIN_PATH}.real" "\$@" &
+PID=\$!
 
-/usr/local/bin/madagent.real "$@" &
-PID=$!
+trap 'kill -TERM "\$PID" 2>/dev/null' TERM INT
 
-wait $PID
-exit $?
+wait "\$PID"
+exit \$?
 EOF
 
   chmod +x "$BIN_PATH"
@@ -212,6 +212,7 @@ ExecStart=/usr/local/bin/madagent
 Restart=always
 RestartSec=5
 Environment=MADAGENT_CONFIG=/etc/madagent.json
+TimeoutStopSec=15
 
 [Install]
 WantedBy=multi-user.target
