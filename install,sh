@@ -70,8 +70,23 @@ esac
 AGENT_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/latest/download/madagent-${AGENT_ARCH}"
 
 echo "[*] Скачиваю бинарник агента: $AGENT_URL"
-curl -fsSL "$AGENT_URL" -o "$BIN_PATH"
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL "$AGENT_URL" -o "$BIN_PATH"
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO "$BIN_PATH" "$AGENT_URL"
+else
+  echo "Ошибка: ни curl, ни wget не найдены."
+  exit 1
+fi
+
 chmod +x "$BIN_PATH"
+
+# sanity-check
+if ! file "$BIN_PATH" | grep -q 'ELF 64-bit'; then
+  echo "Ошибка: скачан не ELF-бинарник. Возможно, GitHub вернул HTML/ошибку."
+  echo "Проверь вручную: $AGENT_URL"
+  exit 1
+fi
 
 # --- конфиг ---
 echo "[*] Пишу конфиг в $CONFIG_PATH"
