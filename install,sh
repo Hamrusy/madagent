@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# === настройки по умолчанию ===
-API_URL_DEFAULT="https://madhost.pw"  # сюда агент будет слать метрики
-# репозиторий с релизами
+API_URL_DEFAULT="https://madhost.pw"
 GITHUB_USER="Hamrusy"
 GITHUB_REPO="madagent"
 
@@ -15,7 +13,6 @@ NODE_ID=""
 NODE_TOKEN=""
 API_URL="$API_URL_DEFAULT"
 
-# --- разбор аргументов ---
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --node-id)
@@ -51,7 +48,6 @@ fi
 echo "[*] Установка агента MadHost для узла: $NODE_ID"
 echo "[*] API URL (куда шлём метрики): $API_URL"
 
-# --- определяем архитектуру ---
 ARCH="$(uname -m)"
 case "$ARCH" in
   x86_64|amd64)
@@ -66,8 +62,36 @@ case "$ARCH" in
     ;;
 esac
 
-# --- URL релиза ---
-AGENT_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/latest/download/madagent-${AGENT_ARCH}"
+# --- определяем версию glibc ---
+GLIBC_VER=""
+
+if command -v getconf >/dev/null 2>&1; then
+  GLIBC_VER=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}' || true)
+fi
+
+if [[ -z "${GLIBC_VER}" ]] && command -v ldd >/dev/null 2>&1; then
+  GLIBC_VER=$(ldd --version 2>/dev/null | head -n1 | sed -E 's/.* //')
+fi
+
+version_ge() {
+  # usage: version_ge "2.34" "2.32"  -> 0 (true) если 2.34 >= 2.32
+  [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -n1)" = "$2" ]
+}
+
+AGENT_FLAVOUR="$AGENT_ARCH"
+
+if [[ -n "${GLIBC_VER}" ]]; then
+  if version_ge "${GLIBC_VER}" "2.32"; then
+    echo "[*] Обнаружен glibc ${GLIBC_VER} (>= 2.32), используем стандартный бинарник."
+  else
+    echo "[*] Обнаружен glibc ${GLIBC_VER} (< 2.32), используем бинарник для старых систем."
+    AGENT_FLAVOUR="${AGENT_ARCH}-legacy"
+  fi
+else
+  echo "[*] Не удалось определить версию glibc, используем стандартный бинарник."
+fi
+
+AGENT_URL="https://github.com/${GITHUB_USER}/${GITHUB_REPO}/releases/latest/download/madagent-${AGENT_FLAVOUR}"
 
 echo "[*] Скачиваю бинарник агента: $AGENT_URL"
 if command -v curl >/dev/null 2>&1; then
@@ -81,14 +105,12 @@ fi
 
 chmod +x "$BIN_PATH"
 
-# sanity-check
 if ! file "$BIN_PATH" | grep -q 'ELF 64-bit'; then
   echo "Ошибка: скачан не ELF-бинарник. Возможно, GitHub вернул HTML/ошибку."
   echo "Проверь вручную: $AGENT_URL"
   exit 1
 fi
 
-# --- конфиг ---
 echo "[*] Пишу конфиг в $CONFIG_PATH"
 mkdir -p "$(dirname "$CONFIG_PATH")"
 
@@ -102,7 +124,6 @@ EOF
 
 chmod 600 "$CONFIG_PATH"
 
-# --- systemd unit ---
 echo "[*] Настраиваю systemd юнит в $UNIT_PATH"
 
 cat > "$UNIT_PATH" <<'EOF'
@@ -122,15 +143,23 @@ Environment=MADAGENT_CONFIG=/etc/madagent.json
 WantedBy=multi-user.target
 EOF
 
-# --- запуск сервиса ---
 echo "[*] Перезапуск systemd daemon и запуск сервиса"
 systemctl daemon-reload
 systemctl enable --now madagent
 
 sleep 2
-systemctl --no-pager --full status madagent || true
 
-echo
-echo "[✓] Агент установлен и запущен."
-echo "    Конфиг:   $CONFIG_PATH"
-echo "    Бинарник: $BIN_PATH"
+if systemctl is-active --quiet madagent; then
+  systemctl --no-pager --full status madagent || true
+  echo
+  echo "[✓] Агент установлен и запущен."
+  echo "    Конфиг:   $CONFIG_PATH"
+  echo "    Бинарник: $BIN_PATH"
+else
+  systemctl --no-pager --full status madagent || true
+  echo
+  echo "[!] Агент установлен, но не удалось запустить (см. лог выше / journalctl -u madagent)."
+  echo "    Конфиг:   $CONFIG_PATH"
+  echo "    Бинарник: $BIN_PATH"
+  exit 1
+fi
